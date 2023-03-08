@@ -5,6 +5,9 @@ import os
 import random
 import sys
 import time
+
+from tqdm import tqdm
+
 from utils import floor
 
 from lxml import etree
@@ -102,13 +105,13 @@ class BilibiliUpGPT(object):
 
         return self._proxies_request(url, parameters)
 
-    def get_user_response(self):
+    def get_user_response(self, mid):
 
-        url = f"https://api.bilibili.com/x/web-interface/card?mid={self.uuid}"
+        url = f"https://api.bilibili.com/x/web-interface/card"
         try:
             # submit GET curl request
             parameters = {
-                "photo": 'false'
+                "mid": mid
             }
 
         except Exception as e:
@@ -148,7 +151,6 @@ class BilibiliUpGPT(object):
 
         # submit GET curl request
         parameters = {
-            # "order_type": 'attention',
             "vmid": self.uuid,
             "ps": 250,
             "pn": 1
@@ -167,6 +169,38 @@ class BilibiliUpGPT(object):
 
         return self._proxies_request(url, parameters)
 
+    def get_content_response(self, avid):
+
+        url = f"https://api.bilibili.com/x/web-interface/view"
+
+        # submit GET curl request
+        parameters = {
+            "aid": avid
+        }
+
+        return self._proxies_request(url, parameters)
+
+    def get_charge_response(self, mid):
+
+        url = f"https://api.bilibili.com/x/ugcpay-rank/elec/month/up"
+
+        # submit GET curl request
+        parameters = {
+            "up_mid": mid
+        }
+
+        return self._proxies_request(url, parameters)
+
+    def get_reply_response(self, avid):
+
+        url = f"https://api.bilibili.com/x/web-interface/view/detail"
+
+        # submit GET curl request
+        parameters = {
+            "aid": avid
+        }
+
+        return self._proxies_request(url, parameters)
 
     @staticmethod
     def eval_chat(knowledge, inputs: str) -> str:
@@ -201,7 +235,7 @@ class BilibiliUpGPT(object):
             model="gpt-3.5-turbo",
             messages=messages,
             temperature=0.75,
-            max_tokens=1949,
+            max_tokens=1024,
             top_p=1,
             frequency_penalty=1,
             presence_penalty=0,
@@ -215,11 +249,71 @@ class BilibiliUpGPT(object):
             writer.write({"Q": inputs, "A": answer})
             return answer
 
+    def bili_player_list(self, bvid):
+        url = 'https://api.bilibili.com/x/player/pagelist'
+        params = {
+            "bvid": bvid
+        }
+        response = self._proxies_request(url, params)
+        cid_list = [x['cid'] for x in response.json()['data']]
+        return cid_list
+
+    def bili_subtitle_list(self, bvid, cid):
+        url = f'https://api.bilibili.com/x/player/v2'
+        params = {
+            "bvid": bvid,
+            "cid": cid
+        }
+        response = self._proxies_request(url, params)
+        subtitles = json.loads(response.text)['data']['subtitle']['subtitles']
+
+        if subtitles:
+            return ['https:' + x['subtitle_url'] for x in subtitles]
+        else:
+            return []
+
+    def bili_subtitle(self, bvid, cid):
+        subtitles = self.bili_subtitle_list(bvid, cid)
+        parameters = {}
+        if subtitles:
+            response = self._proxies_request(subtitles[0], parameters)
+            if response.status_code == 200:
+                body = response.json()['body']
+                return body
+        return []
+
+    def get_summary(self, jsons) -> str:
+        """
+        测试finetuned模型的生成结果质量
+        :param: self.image_dict
+        :return:
+        """
+        openai.api_key = "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"
+
+        # HootGPTTrainingProcessor.eval_ask(prompt)
+        # Make a request to the ChatGPT API
+        messages = [dict(role="system",
+                         content=f"You are an assistant and summarize user's input"),
+                    {"role": 'user', "content": jsons}]
+
+        print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Load {len(jsons)} cc tokens.")
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=messages,
+            temperature=0.75,
+            max_tokens=2048,
+            top_p=1,
+            frequency_penalty=1,
+            presence_penalty=0,
+        )
+
+        return response["choices"][0]["message"]['content'].strip()
+
     def generate_prompt(self):
         # s = json.dumps({'key1': 'value1', 'key2': 'value2'})
         # r = requests.post(url, data=s)
         video_response = self.get_video_response()
-        user_response = self.get_user_response()
+        user_response = self.get_user_response(self.uuid)
         acc_response = self.get_acc_response("")
         relation_response = self.get_relation_response()
 
@@ -251,7 +345,7 @@ class BilibiliUpGPT(object):
                 result += f"""UP主{uploader}的学校为{school}。"""
         except Exception as e:
             logging.warning(f"occurs data miss due to {e}")
-        result += f"""今年是2023年，UP主{uploader}一共在"""
+        result += f"""UP主{uploader}一共在"""
 
         json_data = json.loads(video_response.text)
         tid_list = [(x['name'], x['count']) for x in json_data['data']['list']['tlist'].values()]
@@ -268,7 +362,11 @@ class BilibiliUpGPT(object):
         video_list = json_data['data']['list']['vlist']
         result += f"UP最近投稿的10个视频分别为:"
         count = 1
-        for video in video_list[:10]:
+        bar = tqdm(video_list[:10],
+                   total=len(video_list[:10]),
+                   desc=f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 视频信息解析进度",
+                   ncols=100)
+        for video in bar:
             title = video['title']  # 标题
             view = video['play']  # 播放量
             comments = video['comment']  # 评论数
@@ -289,16 +387,45 @@ class BilibiliUpGPT(object):
                 share = tmp['data']['share']
                 like = tmp['data']['like']
                 his_rank = tmp['data']['his_rank']
+                result += f"弹幕数为{danmaku}，收藏数为{favorite}，收藏率{floor(favorite / view * 100)}%；投币数为{coin}，投币率{floor(coin / view * 100)}%；" \
+                          f"分享数为{share}，分享率{floor(share / view * 100)}%；点赞数为{like}，点赞率{floor(like / view * 100)}%；"
+            except Exception as e:
+                logging.warning(e)
+
+            if his_rank != 0:
+                result += f"全站最高历史排名{his_rank}。 "
+            else:
+                result += f"没有进入全站热门排行榜。 "
+
+            content = json.loads(self.get_content_response(avid=vid).text)
+            try:
+                subtitle = content['data']['subtitle']
+                staff = content['data']['staff']
+                bvid = content['data']['bvid']
+                subtitle_text = self.bili_subtitle(bvid, self.bili_player_list(bvid)[0])
+                if subtitle_text:
+                    result += f"本视频主要讲了{self.get_summary(subtitle_text)}。"
+                if staff:
+                    result += f"本视频由UP和{staff}联合投稿。"
+            except Exception as e:
+                logging.warning(e)
+
+            content = json.loads(self.get_reply_response(avid=vid).text)
+            try:
+                obj_list = content['data']['Reply']['replies']
+                result += f"本视频的热评来自B站用户"
+                for obj in obj_list[:10]:
+                    if obj['mid']:
+                        usr_name = json.loads(self.get_user_response(obj['mid']).text)['data']['card']['name']
+                        result += f"{usr_name}，"
             except Exception as e:
                 continue
-            result += f"弹幕数为{danmaku}，收藏数为{favorite}，收藏率{floor(favorite / view * 100)}%；投币数为{coin}，投币率{floor(coin / view * 100)}%；" \
-                      f"分享数为{share}，分享率{floor(share / view * 100)}%；点赞数为{like}，点赞率{floor(like / view * 100)}%；全站最高历史排名{his_rank}。 "
 
         # 获取UP主关注列表
         json_data = json.loads(relation_response.text)
         rel_list = json_data['data']['list']
         result += f"UP最近关注的B站用户分别为:"
-        for friend in rel_list[:3]:
+        for friend in rel_list[:10]:
             mtime = cal_timediff(friend['mtime'], datetime.datetime.now().timestamp())
             if friend['special'] == 0:
                 spec = "不是UP的特别关注"
@@ -315,7 +442,11 @@ class BilibiliUpGPT(object):
         level_list = []
         sign_list = []
         follower_list = json.loads(self.get_follower_response().text)['data']['list']
-        for follower in follower_list[:100]:
+        bar = tqdm(follower_list[:100],
+                   total=len(follower_list[:100]),
+                   desc=f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 用户信息解析进度",
+                   ncols=100)
+        for follower in bar:
             mid = follower['mid']
             tmp = json.loads(self.get_acc_response(mid=mid).text)
             try:
@@ -327,9 +458,26 @@ class BilibiliUpGPT(object):
         a = [x for x in level_list if x == 0]
         b = [x for x in level_list if x == 1]
         c = [x for x in level_list if x >= 2]
-        result += f"最近的新增关注中，有{floor(len(a) / len(level_list) * 100)}%是0级用户," \
-                  f"{floor(len(b) / len(level_list) * 100)}%是1级用户,{floor(len(c) / len(level_list) * 100)}%是2级以上用户。"
 
+        if len(level_list) > 0:
+            result += f"最近的新增关注中，有{floor(len(a) / len(level_list) * 100)}%是0级用户," \
+                      f"{floor(len(b) / len(level_list) * 100)}%是1级用户,{floor(len(c) / len(level_list) * 100)}%是2级以上用户。"
+
+        # UP充电人数
+        tmp = json.loads(self.get_charge_response(mid=self.uuid).text)
+        try:
+            count = tmp['data']['count']
+            total_count = tmp['data']['total_count']
+            result += f"本月有{count}人为UP充电，共计{total_count}人充电。"
+        except Exception as e:
+            logging.warning(e)
+        # 视频热门评论
+
+        # B站当前的热门视频有哪些
+
+        # B站最新的入站必刷视频
+
+        # B站最近封禁帐号
         self.result = result
 
     def request_header(self):
@@ -352,8 +500,11 @@ class BilibiliUpGPT(object):
     创建两个列表用来存放代理ip
     '''
     def send_request(self):
-        for i in range(1, 100):
-            print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 正在抓取第{i}页……")
+        bar = tqdm(range(200, 300),
+                   total=len(range(200, 300)),
+                   desc=f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]",
+                   ncols=100)
+        for i in bar:
             response = requests.get(url=f'http://www.ip3366.net/free/?page={i}', headers=self.set_headers())
             text = response.text.encode('ISO-8859-1')
             # print(text.decode('gbk'))
@@ -366,8 +517,7 @@ class BilibiliUpGPT(object):
                 self.all_ip_list.append(proxy)
                 self.test_ip(proxy)  # 开始检测获取到的ip是否可以使用
         print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 抓取完成")
-        print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 抓取到的ip个数为：{len(self.all_ip_list)}")
-        print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 可以使用的ip个数为：{len(self.usable_ip_list)}")
+        print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 可用ip个数为：{len(self.usable_ip_list)}")
 
     def test_ip(self, proxy):
         # 构建代理ip
@@ -383,7 +533,6 @@ class BilibiliUpGPT(object):
             response.close()
             if response.status_code == 200:
                 self.usable_ip_list.append(proxy)
-                print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {proxy} \033[31m可用\033[0m.")
             else:
                 print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {proxy} 不可用.")
         except Exception as e:
@@ -391,13 +540,17 @@ class BilibiliUpGPT(object):
 
 
 def test():
+    domain = input("请输入UP主的空间地址：") # https://space.bilibili.com/371846699
+    uuid = int(domain.split("/")[-1])
     upgpt = BilibiliUpGPT(uuid)
     upgpt.send_request()
-    upgpt.generate_prompt()
 
+    print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 解析完成，正在读取数据...")
+    upgpt.generate_prompt()
+    print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 数据读取完成，upGPT启动")
     while True:
         inputs = input("请输入你的问题：")
-        upgpt.eval_chat(inputs)
+        BilibiliUpGPT.eval_chat(upgpt.result, inputs)
 
 
 if __name__ == "__main__":
